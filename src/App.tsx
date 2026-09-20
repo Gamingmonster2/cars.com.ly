@@ -1,9 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { initializeApp, getApps } from 'firebase/app';
 import { initializeFirestore, collection, addDoc, getDocs, query, orderBy } from 'firebase/firestore';
 import { 
   Search, Plus, Car as CarIcon, MessageCircle, MapPin, 
-  Calendar, Gauge, CheckCircle2, X, Sparkles, Phone, AlertCircle
+  Calendar, Gauge, CheckCircle2, X, Sparkles, AlertCircle, Upload, Loader2, Image as ImageIcon
 } from 'lucide-react';
 
 // إعدادات Firebase الخاصة بمشروعك
@@ -34,7 +34,34 @@ export interface Car {
   description: string;
 }
 
-// سيارات أولية جاهزة للعرض
+// دالة لضغط الصور تلقائياً لتوفير المساحة وسرعة التحميل
+function compressImage(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = (event) => {
+      const img = new Image();
+      img.src = event.target?.result as string;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const MAX_WIDTH = 900;
+        const scale = Math.min(1, MAX_WIDTH / img.width);
+        canvas.width = img.width * scale;
+        canvas.height = img.height * scale;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          resolve(canvas.toDataURL('image/jpeg', 0.75));
+        } else {
+          resolve(img.src);
+        }
+      };
+      img.onerror = reject;
+    };
+    reader.onerror = reject;
+  });
+}
+
 const INITIAL_CARS: Car[] = [
   {
     id: 'car-1',
@@ -59,18 +86,6 @@ const INITIAL_CARS: Car[] = [
     whatsapp: '218920000000',
     description: 'استيراد كوري، دفع رباعي، كاميرات 360، رادار ونقطة عمياء، خالية من أي صدمات.',
     image: 'https://images.unsplash.com/photo-1549399542-7e3f8b79c341?auto=format&fit=crop&w=800&q=80'
-  },
-  {
-    id: 'car-3',
-    make: 'كيا',
-    model: 'سبورتاج',
-    year: 2021,
-    price: 67000,
-    mileage: '55,000 كم',
-    city: 'مصراتة',
-    whatsapp: '218911111111',
-    description: 'محرك اقتصادي، تكييف ممتاز، حساسات خلفية، مقاعد جلد، صيانة دورية منتظمة.',
-    image: 'https://images.unsplash.com/photo-1533473359331-0135ef1b58bf?auto=format&fit=crop&w=800&q=80'
   }
 ];
 
@@ -82,7 +97,7 @@ export default function App() {
   const [showModal, setShowModal] = useState(false);
   const [toast, setToast] = useState<{ type: 'success' | 'error', message: string } | null>(null);
 
-  // حقول نموذج إضافة السيارة
+  // حالة نموذج الإضافة
   const [formData, setFormData] = useState({
     make: '',
     model: '',
@@ -95,18 +110,24 @@ export default function App() {
     image: ''
   });
 
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   useEffect(() => {
-    loadCarsFromFirestore();
+    loadCars();
   }, []);
 
-  const loadCarsFromFirestore = async () => {
+  const loadCars = async () => {
     try {
       setLoading(true);
       const q = query(collection(db, 'cars'), orderBy('year', 'desc'));
       const snapshot = await getDocs(q);
       if (!snapshot.empty) {
         const fetched = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Car));
-        setCars(fetched);
+        // تجنب التكرار
+        const uniqueCars = Array.from(new Map([...fetched, ...INITIAL_CARS].map(c => [c.id, c])).values());
+        setCars(uniqueCars);
       }
     } catch (e) {
       console.warn('Firestore offline fallback', e);
@@ -115,13 +136,32 @@ export default function App() {
     }
   };
 
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      setUploadingImage(true);
+      const compressed = await compressImage(file);
+      setFormData(prev => ({ ...prev, image: compressed }));
+    } catch (err) {
+      console.error('Error compressing image', err);
+    } finally {
+      setUploadingImage(false);
+    }
+  };
+
   const handleSubmitCar = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return; // منع الضغط المتكرر
+
     if (!formData.make || !formData.model || !formData.price || !formData.whatsapp) {
       setToast({ type: 'error', message: 'يرجى تعبئة الحقول الأساسية المطلوبة.' });
       setTimeout(() => setToast(null), 3000);
       return;
     }
+
+    setIsSubmitting(true);
 
     const cleanWhatsapp = formData.whatsapp.replace(/\D/g, '');
     const finalWhatsapp = cleanWhatsapp.startsWith('0') ? '218' + cleanWhatsapp.slice(1) : cleanWhatsapp;
@@ -134,32 +174,37 @@ export default function App() {
       mileage: formData.mileage.trim() || 'غير محدد',
       city: formData.city,
       whatsapp: finalWhatsapp,
-      description: formData.description.trim() || 'سيارة بحالة جيدة للمعاينة والتواصل عبر الواتساب.',
-      image: formData.image.trim() || 'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?auto=format&fit=crop&w=800&q=80'
+      description: formData.description.trim() || 'سيارة بحالة ممتازة للمعاينة والتواصل المباشر.',
+      image: formData.image || 'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?auto=format&fit=crop&w=800&q=80'
     };
 
     try {
       const docRef = await addDoc(collection(db, 'cars'), newCar);
       setCars(prev => [{ ...newCar, id: docRef.id }, ...prev]);
-    } catch {
-      setCars(prev => [{ ...newCar, id: 'local-' + Date.now() }, ...prev]);
+      setShowModal(false);
+      setToast({ type: 'success', message: 'تم نشر إعلان سيارتك بنجاح وسيتوفر للجميع!' });
+      
+      // تفريغ النموذج
+      setFormData({
+        make: '',
+        model: '',
+        year: new Date().getFullYear(),
+        price: '',
+        mileage: '',
+        city: 'طرابلس',
+        whatsapp: '',
+        description: '',
+        image: ''
+      });
+    } catch (err) {
+      const localId = 'local-' + Date.now();
+      setCars(prev => [{ ...newCar, id: localId }, ...prev]);
+      setShowModal(false);
+      setToast({ type: 'success', message: 'تم حفظ الإعلان ونشره بنجاح!' });
+    } finally {
+      setIsSubmitting(false);
+      setTimeout(() => setToast(null), 3500);
     }
-
-    setShowModal(false);
-    setToast({ type: 'success', message: 'تم نشر إعلان سيارتك بنجاح!' });
-    setTimeout(() => setToast(null), 3500);
-
-    setFormData({
-      make: '',
-      model: '',
-      year: new Date().getFullYear(),
-      price: '',
-      mileage: '',
-      city: 'طرابلس',
-      whatsapp: '',
-      description: '',
-      image: ''
-    });
   };
 
   const filteredCars = cars.filter(car => {
@@ -174,7 +219,7 @@ export default function App() {
   return (
     <div dir="rtl" className="min-h-screen bg-slate-50 text-slate-900 font-sans">
       
-      {/* التنبيه المنبثق */}
+      {/* Toast Notification */}
       {toast && (
         <div className={`fixed top-5 left-1/2 -translate-x-1/2 z-50 px-6 py-3.5 rounded-2xl shadow-2xl font-bold text-sm flex items-center gap-3 border ${
           toast.type === 'success' ? 'bg-emerald-900 text-emerald-100 border-emerald-500/40' : 'bg-rose-900 text-rose-100 border-rose-500/40'
@@ -184,7 +229,7 @@ export default function App() {
         </div>
       )}
 
-      {/* الشريط العلوي */}
+      {/* Header */}
       <header className="sticky top-0 z-40 bg-white/90 backdrop-blur-md border-b border-slate-200 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-20 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -207,23 +252,22 @@ export default function App() {
         </div>
       </header>
 
-      {/* الواجهة الرئيسية والبحث */}
+      {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-10 space-y-10">
         
-        {/* قسم العنوان والبحث */}
+        {/* Title & Search */}
         <section className="text-center space-y-4 max-w-3xl mx-auto">
           <div className="inline-flex items-center gap-2 bg-blue-50 border border-blue-200/80 px-4 py-1.5 rounded-full text-blue-700 text-xs font-black">
             <Sparkles className="w-4 h-4" />
-            <span>المنصة الأولى المباشرة لبيع وشراء السيارات في ليبيا</span>
+            <span>المنصة المباشرة لبيع وشراء السيارات في ليبيا</span>
           </div>
           <h2 className="text-4xl sm:text-5xl font-black text-slate-900 leading-tight">
             ابحث عن سيارتك القادمة <span className="text-blue-600">بكل سهولة</span>
           </h2>
           <p className="text-slate-600 text-base">
-            تصفح أحدث عروض السيارات في طرابلس، بنغازي، مصراتة وكافة المدن الليبية مع التواصل المباشر عبر الواتساب.
+            تصفح أحدث عروض السيارات في طرابلس، بنغازي، مصراتة وكافة المدن مع إمكانية التواصل الفوري عبر الواتساب.
           </p>
 
-          {/* شريط البحث وفلترة المدن */}
           <div className="pt-4 flex flex-col sm:flex-row gap-3">
             <div className="relative flex-1">
               <Search className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 w-5 h-5" />
@@ -231,7 +275,7 @@ export default function App() {
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="ابحث بالنوع أو الموديل (تويوتا، كيا، هونداي...)"
+                placeholder="ابحث بالنوع أو الموديل (تويوتا، هيونداي...)"
                 className="w-full pl-4 pr-12 py-3.5 bg-white border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600 shadow-sm text-sm"
               />
             </div>
@@ -253,7 +297,7 @@ export default function App() {
           </div>
         </section>
 
-        {/* شبكة عرض السيارات */}
+        {/* Cars Grid */}
         <section className="space-y-6">
           <div className="flex items-center justify-between border-b border-slate-200 pb-4">
             <h3 className="text-xl font-bold text-slate-900">
@@ -336,7 +380,7 @@ export default function App() {
         </section>
       </main>
 
-      {/* نافذة إضافة سيارة جديدة */}
+      {/* Modal Add Car */}
       {showModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-white rounded-3xl max-w-xl w-full p-6 sm:p-8 shadow-2xl relative my-8 animate-in fade-in zoom-in duration-200">
@@ -353,7 +397,7 @@ export default function App() {
               </div>
               <div>
                 <h3 className="text-xl font-black text-slate-900">إضافة إعلان سيارة جديدة</h3>
-                <p className="text-xs text-slate-500">سيظهر إعلانك مباشرة لآلاف المشترين في ليبيا</p>
+                <p className="text-xs text-slate-500">سيظهر إعلانك فوراً في ليبيا</p>
               </div>
             </div>
 
@@ -449,15 +493,46 @@ export default function App() {
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">رابط صورة السيارة (URL)</label>
-                <input
-                  type="url"
-                  placeholder="https://example.com/car-image.jpg (اتركه فارغاً لصورة تلقائية)"
-                  value={formData.image}
-                  onChange={(e) => setFormData({ ...formData, image: e.target.value })}
-                  className="w-full px-3.5 py-2.5 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-600 focus:outline-none"
+              {/* قسم رفع الصورة من الهاتف */}
+              <div className="space-y-2">
+                <label className="block text-xs font-bold text-slate-700">صورة السيارة</label>
+                
+                <input 
+                  type="file" 
+                  ref={fileInputRef}
+                  accept="image/*"
+                  onChange={handleImageUpload}
+                  className="hidden"
                 />
+
+                <div className="flex gap-3 items-center">
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={uploadingImage}
+                    className="flex-1 border-2 border-dashed border-blue-300 hover:border-blue-500 bg-blue-50/60 hover:bg-blue-50 py-4 px-3 rounded-2xl flex items-center justify-center gap-2 text-blue-700 transition-all font-bold text-xs sm:text-sm"
+                  >
+                    {uploadingImage ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : (
+                      <Upload className="w-5 h-5 text-blue-600" />
+                    )}
+                    <span>{uploadingImage ? 'جاري معالجة الصورة...' : 'اضغط لاختيار صورة من هاتفك أو جهازك'}</span>
+                  </button>
+
+                  {formData.image && (
+                    <div className="relative w-16 h-16 rounded-xl overflow-hidden border border-slate-300 flex-shrink-0">
+                      <img src={formData.image} alt="معاينة" className="w-full h-full object-cover" />
+                      <button
+                        type="button"
+                        onClick={() => setFormData({ ...formData, image: '' })}
+                        className="absolute inset-0 bg-rose-600/70 text-white text-[10px] font-bold flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity"
+                      >
+                        حذف
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
 
               <div>
@@ -474,9 +549,19 @@ export default function App() {
               <div className="pt-3">
                 <button
                   type="submit"
-                  className="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl shadow-lg shadow-blue-600/30 transition-all text-base"
+                  disabled={isSubmitting || uploadingImage}
+                  className={`w-full text-white font-black py-3 rounded-xl shadow-lg transition-all text-base flex items-center justify-center gap-2 ${
+                    isSubmitting ? 'bg-blue-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 active:scale-95 shadow-blue-600/30'
+                  }`}
                 >
-                  نشر الإعلان الآن
+                  {isSubmitting ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      <span>جاري نشر الإعلان...</span>
+                    </>
+                  ) : (
+                    <span>نشر الإعلان الآن</span>
+                  )}
                 </button>
               </div>
             </form>
@@ -484,7 +569,7 @@ export default function App() {
         </div>
       )}
 
-      {/* أسفل الصفحة */}
+      {/* Footer */}
       <footer className="mt-20 border-t border-slate-200 py-8 text-center text-xs text-slate-500 font-semibold">
         <p>© {new Date().getFullYear()} سوق سيارات ليبيا (cars.com.ly) - جميع الحقوق محفوظة</p>
       </footer>
