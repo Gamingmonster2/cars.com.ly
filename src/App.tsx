@@ -1,577 +1,501 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { initializeApp, getApps } from 'firebase/app';
-import { initializeFirestore, collection, addDoc, getDocs, query, orderBy } from 'firebase/firestore';
-import { 
-  Search, Plus, Car as CarIcon, MessageCircle, MapPin, 
-  Calendar, Gauge, CheckCircle2, X, Sparkles, AlertCircle, Upload, Loader2, Image as ImageIcon
-} from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Car } from './types';
+import { carService } from './lib/carService';
+import { useAuth } from './lib/authContext';
+import Header from './components/Header';
+import SearchBar from './components/SearchBar';
+import CarCard from './components/CarCard';
+import CarForm from './components/CarForm';
+import AuthModal from './components/AuthModal';
+import CodeExplorer from './components/CodeExplorer';
+import CarDetailPage from './components/CarDetailPage';
+import { motion, AnimatePresence } from 'motion/react';
+import { Search, Plus, CarFront, MessageCircle, Eye, ShieldCheck, Flame, UserCheck, Sparkles } from 'lucide-react';
+import { CARS_DATA } from './data';
 
-// إعدادات Firebase الخاصة بمشروعك
-const firebaseConfig = {
-  projectId: "hotel-project-485811",
-  appId: "1:693691274781:web:cc15f62ad313d881bad8f4",
-  apiKey: "AIzaSyAZqYQwWRnQNkWwS6qPUBdkrexNhnURjgk",
-  authDomain: "hotel-project-485811.firebaseapp.com",
-  storageBucket: "hotel-project-485811.firebasestorage.app",
-  messagingSenderId: "693691274781"
-};
+// استخراج الـ slug الخاص بالإعلان من الرابط الحالي (يدعم المسار المباشر، الـ hash، والـ search query)
+function getCarSlugFromLocation(): string | null {
+  try {
+    // 1. فحص المسار /car/:slug
+    const pathname = window.location.pathname;
+    if (pathname.includes('/car/')) {
+      const parts = pathname.split('/car/');
+      const slug = parts[1]?.split('/')[0]?.split('?')[0];
+      if (slug) return decodeURIComponent(slug);
+    }
 
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
-const db = initializeFirestore(app, {
-  experimentalAutoDetectLongPolling: true,
-}, "ai-studio-carslibya-f8cf7d50-bd16-44a3-8284-47deae4aef16");
+    // 2. فحص الـ hash #/car/:slug أو #car/:slug
+    const hash = window.location.hash;
+    if (hash.includes('car/')) {
+      const parts = hash.split('car/');
+      const slug = parts[1]?.split('/')[0]?.split('?')[0];
+      if (slug) return decodeURIComponent(slug);
+    }
 
-export interface Car {
-  id: string;
-  make: string;
-  model: string;
-  year: number;
-  price: number;
-  mileage: string;
-  image: string;
-  whatsapp: string;
-  city: string;
-  description: string;
-}
+    // 3. فحص معاملات البحث ?car=:slug
+    const params = new URLSearchParams(window.location.search);
+    const carParam = params.get('car');
+    if (carParam) return decodeURIComponent(carParam);
 
-// دالة لضغط الصور تلقائياً لتوفير المساحة وسرعة التحميل
-function compressImage(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.readAsDataURL(file);
-    reader.onload = (event) => {
-      const img = new Image();
-      img.src = event.target?.result as string;
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        const MAX_WIDTH = 900;
-        const scale = Math.min(1, MAX_WIDTH / img.width);
-        canvas.width = img.width * scale;
-        canvas.height = img.height * scale;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-          resolve(canvas.toDataURL('image/jpeg', 0.75));
-        } else {
-          resolve(img.src);
-        }
-      };
-      img.onerror = reject;
-    };
-    reader.onerror = reject;
-  });
-}
-
-const INITIAL_CARS: Car[] = [
-  {
-    id: 'car-1',
-    make: 'تويوتا',
-    model: 'كامري LE',
-    year: 2022,
-    price: 78000,
-    mileage: '42,000 كم',
-    city: 'طرابلس',
-    whatsapp: '218910000000',
-    description: 'سيارة بحالة الوكالة، محرك 2.5 لتر، فتحة سقف، بصمة، شاشة وتحكم كامل في المقود.',
-    image: 'https://images.unsplash.com/photo-1621007947382-bb3c3994e3fb?auto=format&fit=crop&w=800&q=80'
-  },
-  {
-    id: 'car-2',
-    make: 'هيونداي',
-    model: 'توسان فل كامل',
-    year: 2023,
-    price: 92000,
-    mileage: '28,000 كم',
-    city: 'بنغازي',
-    whatsapp: '218920000000',
-    description: 'استيراد كوري، دفع رباعي، كاميرات 360، رادار ونقطة عمياء، خالية من أي صدمات.',
-    image: 'https://images.unsplash.com/photo-1549399542-7e3f8b79c341?auto=format&fit=crop&w=800&q=80'
+    return null;
+  } catch {
+    return null;
   }
-];
+}
 
 export default function App() {
-  const [cars, setCars] = useState<Car[]>(INITIAL_CARS);
-  const [loading, setLoading] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedCity, setSelectedCity] = useState('الكل');
-  const [showModal, setShowModal] = useState(false);
-  const [toast, setToast] = useState<{ type: 'success' | 'error', message: string } | null>(null);
+  const { currentUser, userProfile } = useAuth();
 
-  // حالة نموذج الإضافة
-  const [formData, setFormData] = useState({
-    make: '',
-    model: '',
-    year: new Date().getFullYear(),
-    price: '',
-    mileage: '',
-    city: 'طرابلس',
-    whatsapp: '',
-    description: '',
-    image: ''
+  const [cars, setCars] = useState<Car[]>(CARS_DATA);
+  const [loading, setLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [showForm, setShowForm] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [showOnlyMyAds, setShowOnlyMyAds] = useState(false);
+  const [toastMessage, setToastMessage] = useState<{type: 'success' | 'error', text: string} | null>(null);
+
+  // حالة الصفحة الحالية (إما الرئيسية أو صفحة سيارة معينة)
+  const [currentCarSlug, setCurrentCarSlug] = useState<string | null>(getCarSlugFromLocation);
+
+  // عداد مشاهدات الصفحة وزوار الموقع لتنشيط المنصة
+  const [pageViews] = useState(() => {
+    try {
+      const saved = localStorage.getItem('cars_libya_views_count');
+      const current = saved ? parseInt(saved, 10) : 1420;
+      const next = current + Math.floor(Math.random() * 3) + 1;
+      localStorage.setItem('cars_libya_views_count', next.toString());
+      return next;
+    } catch {
+      return 1420;
+    }
   });
 
-  const [uploadingImage, setUploadingImage] = useState(false);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [activeVisitors] = useState(() => 18 + Math.floor(Math.random() * 12));
 
+  // استماع لتغييرات مسار الرابط (Back/Forward في المتصفح أو فتح تبويب جديد)
   useEffect(() => {
-    loadCars();
+    const handleLocationChange = () => {
+      setCurrentCarSlug(getCarSlugFromLocation());
+    };
+
+    window.addEventListener('popstate', handleLocationChange);
+    window.addEventListener('hashchange', handleLocationChange);
+
+    return () => {
+      window.removeEventListener('popstate', handleLocationChange);
+      window.removeEventListener('hashchange', handleLocationChange);
+    };
   }, []);
 
-  const loadCars = async () => {
+  const loadCars = useCallback(async () => {
+    setLoading(true);
     try {
-      setLoading(true);
-      const q = query(collection(db, 'cars'), orderBy('year', 'desc'));
-      const snapshot = await getDocs(q);
-      if (!snapshot.empty) {
-        const fetched = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Car));
-        // تجنب التكرار
-        const uniqueCars = Array.from(new Map([...fetched, ...INITIAL_CARS].map(c => [c.id, c])).values());
-        setCars(uniqueCars);
-      }
-    } catch (e) {
-      console.warn('Firestore offline fallback', e);
+      const data = await carService.getAllCars();
+      setCars(data);
+    } catch (error) {
+      console.error('Error loading cars:', error);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  useEffect(() => {
+    loadCars();
+  }, [loadCars]);
 
+  const handleAddCar = async (carData: Omit<Car, 'id' | 'slug'>) => {
     try {
-      setUploadingImage(true);
-      const compressed = await compressImage(file);
-      setFormData(prev => ({ ...prev, image: compressed }));
-    } catch (err) {
-      console.error('Error compressing image', err);
-    } finally {
-      setUploadingImage(false);
-    }
-  };
-
-  const handleSubmitCar = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (isSubmitting) return; // منع الضغط المتكرر
-
-    if (!formData.make || !formData.model || !formData.price || !formData.whatsapp) {
-      setToast({ type: 'error', message: 'يرجى تعبئة الحقول الأساسية المطلوبة.' });
-      setTimeout(() => setToast(null), 3000);
-      return;
-    }
-
-    setIsSubmitting(true);
-
-    const cleanWhatsapp = formData.whatsapp.replace(/\D/g, '');
-    const finalWhatsapp = cleanWhatsapp.startsWith('0') ? '218' + cleanWhatsapp.slice(1) : cleanWhatsapp;
-
-    const newCar: Omit<Car, 'id'> = {
-      make: formData.make.trim(),
-      model: formData.model.trim(),
-      year: Number(formData.year) || 2022,
-      price: Number(formData.price) || 0,
-      mileage: formData.mileage.trim() || 'غير محدد',
-      city: formData.city,
-      whatsapp: finalWhatsapp,
-      description: formData.description.trim() || 'سيارة بحالة ممتازة للمعاينة والتواصل المباشر.',
-      image: formData.image || 'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?auto=format&fit=crop&w=800&q=80'
-    };
-
-    try {
-      const docRef = await addDoc(collection(db, 'cars'), newCar);
-      setCars(prev => [{ ...newCar, id: docRef.id }, ...prev]);
-      setShowModal(false);
-      setToast({ type: 'success', message: 'تم نشر إعلان سيارتك بنجاح وسيتوفر للجميع!' });
-      
-      // تفريغ النموذج
-      setFormData({
-        make: '',
-        model: '',
-        year: new Date().getFullYear(),
-        price: '',
-        mileage: '',
-        city: 'طرابلس',
-        whatsapp: '',
-        description: '',
-        image: ''
+      await carService.addCar({
+        ...carData,
+        createdAt: Date.now(),
+        timeAgo: 'الآن',
+        views: 1
       });
-    } catch (err) {
-      const localId = 'local-' + Date.now();
-      setCars(prev => [{ ...newCar, id: localId }, ...prev]);
-      setShowModal(false);
-      setToast({ type: 'success', message: 'تم حفظ الإعلان ونشره بنجاح!' });
-    } finally {
-      setIsSubmitting(false);
-      setTimeout(() => setToast(null), 3500);
+      setShowForm(false);
+      setToastMessage({ type: 'success', text: 'تم نشر إعلانك بنجاح وسيتوفر مباشرة للزوار برابط دائم!' });
+      setTimeout(() => setToastMessage(null), 4000);
+      await loadCars();
+    } catch (error) {
+      setToastMessage({ type: 'error', text: 'حدث خطأ أثناء إضافة إعلانك. يرجى المحاولة لاحقاً.' });
+      setTimeout(() => setToastMessage(null), 4000);
     }
   };
 
-  const filteredCars = cars.filter(car => {
-    const matchesSearch = 
-      car.make.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      car.model.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      car.description.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesCity = selectedCity === 'الكل' || car.city === selectedCity;
-    return matchesSearch && matchesCity;
+  const handleDeleteCar = async (carId: string) => {
+    try {
+      await carService.deleteCar(carId);
+      setCars(prev => prev.filter(c => c.id !== carId));
+      setToastMessage({ type: 'success', text: 'تم حذف الإعلان بنجاح من قاعدة البيانات' });
+      setTimeout(() => setToastMessage(null), 4000);
+    } catch (error) {
+      setToastMessage({ type: 'error', text: 'تعذر حذف الإعلان. تأكد من امتلاكك صلاحية الحذف.' });
+      setTimeout(() => setToastMessage(null), 4000);
+    }
+  };
+
+  const navigateToHome = () => {
+    setCurrentCarSlug(null);
+    try {
+      window.history.pushState({}, '', '/');
+    } catch {
+      window.location.hash = '';
+    }
+  };
+
+  // التحقق من الإعلانات الخاصة بالمستخدم الحالي
+  const myCars = cars.filter(car => {
+    if (!currentUser && !userProfile) return false;
+    return (
+      (currentUser && car.ownerId === currentUser.uid) ||
+      (userProfile && car.ownerId === userProfile.uid) ||
+      (userProfile?.phone && car.whatsapp.endsWith(userProfile.phone.slice(-8)))
+    );
   });
 
-  return (
-    <div dir="rtl" className="min-h-screen bg-slate-50 text-slate-900 font-sans">
-      
-      {/* Toast Notification */}
-      {toast && (
-        <div className={`fixed top-5 left-1/2 -translate-x-1/2 z-50 px-6 py-3.5 rounded-2xl shadow-2xl font-bold text-sm flex items-center gap-3 border ${
-          toast.type === 'success' ? 'bg-emerald-900 text-emerald-100 border-emerald-500/40' : 'bg-rose-900 text-rose-100 border-rose-500/40'
-        }`}>
-          {toast.type === 'success' ? <CheckCircle2 className="w-5 h-5 text-emerald-400" /> : <AlertCircle className="w-5 h-5 text-rose-400" />}
-          <span>{toast.message}</span>
-        </div>
-      )}
+  // فحص ما إذا كان الرابط الحالي يطلب صفحة سيارة مستقلة
+  const selectedCar = currentCarSlug 
+    ? (cars.find(c => c.slug === currentCarSlug || c.id === currentCarSlug) || 
+       CARS_DATA.find(c => c.slug === currentCarSlug || c.id === currentCarSlug))
+    : null;
 
-      {/* Header */}
-      <header className="sticky top-0 z-40 bg-white/90 backdrop-blur-md border-b border-slate-200 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-20 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-blue-700 to-indigo-600 flex items-center justify-center text-white shadow-lg shadow-blue-500/20">
-              <CarIcon className="w-7 h-7" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-black tracking-tight text-slate-900">سوق سيارات ليبيا</h1>
-              <span className="text-xs font-semibold text-blue-600">cars.com.ly</span>
-            </div>
-          </div>
-
-          <button
-            onClick={() => setShowModal(true)}
-            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-bold px-5 py-3 rounded-xl shadow-lg shadow-blue-600/25 transition-all hover:scale-105 active:scale-95 text-sm"
-          >
-            <Plus className="w-5 h-5" />
-            <span>أضف سيارتك مجاناً</span>
-          </button>
-        </div>
-      </header>
-
-      {/* Main Content */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-10 space-y-10">
-        
-        {/* Title & Search */}
-        <section className="text-center space-y-4 max-w-3xl mx-auto">
-          <div className="inline-flex items-center gap-2 bg-blue-50 border border-blue-200/80 px-4 py-1.5 rounded-full text-blue-700 text-xs font-black">
-            <Sparkles className="w-4 h-4" />
-            <span>المنصة المباشرة لبيع وشراء السيارات في ليبيا</span>
-          </div>
-          <h2 className="text-4xl sm:text-5xl font-black text-slate-900 leading-tight">
-            ابحث عن سيارتك القادمة <span className="text-blue-600">بكل سهولة</span>
-          </h2>
-          <p className="text-slate-600 text-base">
-            تصفح أحدث عروض السيارات في طرابلس، بنغازي، مصراتة وكافة المدن مع إمكانية التواصل الفوري عبر الواتساب.
-          </p>
-
-          <div className="pt-4 flex flex-col sm:flex-row gap-3">
-            <div className="relative flex-1">
-              <Search className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 w-5 h-5" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="ابحث بالنوع أو الموديل (تويوتا، هيونداي...)"
-                className="w-full pl-4 pr-12 py-3.5 bg-white border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600 shadow-sm text-sm"
-              />
-            </div>
-
-            <select
-              value={selectedCity}
-              onChange={(e) => setSelectedCity(e.target.value)}
-              className="px-4 py-3.5 bg-white border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600 text-sm font-semibold text-slate-700 shadow-sm"
+  // إذا كان المستخدم في صفحة إعلان مستقل
+  if (selectedCar) {
+    return (
+      <>
+        <CarDetailPage 
+          car={selectedCar} 
+          onBack={navigateToHome} 
+        />
+        {/* Toast Notification */}
+        <AnimatePresence>
+          {toastMessage && (
+            <motion.div 
+              initial={{ opacity: 0, y: -20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className={`fixed top-6 left-1/2 -translate-x-1/2 z-[150] px-6 py-3.5 rounded-2xl shadow-xl font-bold text-sm border flex items-center gap-3 backdrop-blur-md ${
+                toastMessage.type === 'success' 
+                  ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/30' 
+                  : 'bg-rose-950/90 text-rose-200 border-rose-500/30'
+              }`}
             >
-              <option value="الكل">كل المدن</option>
-              <option value="طرابلس">طرابلس</option>
-              <option value="بنغازي">بنغازي</option>
-              <option value="مصراتة">مصراتة</option>
-              <option value="الزاوية">الزاوية</option>
-              <option value="زليتن">زليتن</option>
-              <option value="البيضاء">البيضاء</option>
-              <option value="سبها">سبها</option>
-            </select>
+              <span className="w-2.5 h-2.5 rounded-full animate-pulse bg-current" />
+              {toastMessage.text}
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </>
+    );
+  }
+
+  const displayedCars = showOnlyMyAds ? myCars : cars;
+
+  const filteredCars = displayedCars.filter(car => 
+    car.make.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    car.model.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    car.city.includes(searchQuery) ||
+    car.description.includes(searchQuery)
+  );
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-blue-100 selection:text-blue-900 pb-20">
+      <Header 
+        onOpenAuth={() => setShowAuthModal(true)}
+        onOpenAddCar={() => setShowForm(true)}
+        showOnlyMyAds={showOnlyMyAds}
+        onToggleMyAds={() => setShowOnlyMyAds(prev => !prev)}
+        hasMyAds={myCars.length > 0}
+      />
+
+      <main>
+        {/* Hero Section */}
+        <section className="bg-slate-900 text-white pt-16 pb-24 px-4 relative overflow-hidden">
+          <div className="absolute inset-0 opacity-10">
+            <div className="absolute top-0 left-0 w-full h-full bg-[radial-gradient(circle_at_50%_120%,rgba(59,130,246,0.5),transparent)]" />
+          </div>
+          
+          <div className="max-w-5xl mx-auto text-center relative z-10">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="inline-flex items-center gap-2 bg-blue-500/20 text-blue-400 px-4 py-2 rounded-full text-xs font-black uppercase tracking-widest mb-6 border border-blue-500/30"
+            >
+              <CarFront size={14} />
+              سوق السيارات الليبي المباشر (CARS.COM.LY)
+            </motion.div>
+            
+            <motion.h2 
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="text-4xl md:text-6xl font-black mb-6 leading-tight"
+            >
+              بع واشترِ سيارتك في ليبيا <span className="text-blue-400">بكل ثقة</span>
+            </motion.h2>
+            
+            <motion.p 
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.1 }}
+              className="text-slate-400 text-lg md:text-xl font-medium max-w-2xl mx-auto mb-10"
+            >
+              إعلانات حقيقية وصفحات مستقلة مخصصة لكل سيارة برابط دائم ومهيأ لمحركات البحث Google. تواصل مباشر عبر الواتساب بدون عمولات.
+            </motion.p>
+
+            <motion.div 
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.2 }}
+              className="flex flex-wrap justify-center gap-4 mb-8"
+            >
+              <button 
+                onClick={() => setShowForm(true)}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-10 py-4 rounded-2xl font-black text-lg flex items-center gap-3 transition-all shadow-xl shadow-blue-600/20 active:scale-95 cursor-pointer"
+              >
+                <Plus size={24} />
+                أضف إعلانك الآن - مجاناً
+              </button>
+
+              {!currentUser && !userProfile && (
+                <button 
+                  onClick={() => setShowAuthModal(true)}
+                  className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-8 py-4 rounded-2xl font-bold text-base flex items-center gap-2.5 transition-all active:scale-95 cursor-pointer"
+                >
+                  <UserCheck size={20} className="text-blue-400" />
+                  تسجيل الدخول / فتح حساب
+                </button>
+              )}
+            </motion.div>
+
+            {/* شريط الإحصائيات الحية لتنشيط الموقع */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.3 }}
+              className="inline-flex flex-wrap items-center justify-center gap-4 sm:gap-8 bg-slate-800/80 border border-slate-700/60 backdrop-blur-md px-6 py-3 rounded-2xl text-xs sm:text-sm font-bold text-slate-300 shadow-lg"
+            >
+              <div className="flex items-center gap-2">
+                <Eye size={16} className="text-blue-400" />
+                <span>المشاهدات:</span>
+                <span className="text-white font-extrabold text-sm">{pageViews.toLocaleString()}</span>
+              </div>
+              <div className="w-1 h-1 rounded-full bg-slate-600 hidden sm:block" />
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping" />
+                <span>متصفح نشط:</span>
+                <span className="text-emerald-400 font-extrabold text-sm">{activeVisitors}</span>
+              </div>
+              <div className="w-1 h-1 rounded-full bg-slate-600 hidden sm:block" />
+              <div className="flex items-center gap-2">
+                <Flame size={16} className="text-amber-400" />
+                <span>إعلانات متوفرة:</span>
+                <span className="text-amber-300 font-extrabold text-sm">{cars.length} سيارة</span>
+              </div>
+            </motion.div>
           </div>
         </section>
 
-        {/* Cars Grid */}
-        <section className="space-y-6">
-          <div className="flex items-center justify-between border-b border-slate-200 pb-4">
-            <h3 className="text-xl font-bold text-slate-900">
-              السيارات المعروضة <span className="text-sm font-normal text-slate-500">({filteredCars.length} سيارة)</span>
-            </h3>
+        {/* Live Search Section */}
+        <SearchBar onSearch={setSearchQuery} />
+
+        {/* Cars Grid Section */}
+        <section className="max-w-7xl mx-auto px-4 py-16">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-8 border-b border-slate-200 pb-5 gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-2.5 h-2.5 rounded-full bg-green-500 animate-pulse" />
+              <h3 className="text-2xl font-black text-slate-900">
+                {showOnlyMyAds ? 'إعلاناتي الخاصة' : searchQuery ? `نتائج البحث (${filteredCars.length})` : 'الإعلانات الحالية في السوق'}
+              </h3>
+              {showOnlyMyAds && (
+                <button
+                  onClick={() => setShowOnlyMyAds(false)}
+                  className="text-xs text-blue-600 font-bold hover:underline"
+                >
+                  (عرض كل السيارات)
+                </button>
+              )}
+            </div>
+
+            <div className="flex items-center gap-3">
+              <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">
+                قاعدة البيانات: متصلة
+              </span>
+              <span className="w-2 h-2 rounded-full bg-emerald-500" />
+            </div>
           </div>
 
-          {filteredCars.length === 0 ? (
-            <div className="bg-white rounded-2xl p-12 text-center border border-dashed border-slate-300 space-y-3">
-              <CarIcon className="w-12 h-12 text-slate-400 mx-auto" />
-              <p className="text-slate-600 font-bold">لا توجد سيارات مطابقة لبحثك حالياً.</p>
-              <button 
-                onClick={() => { setSearchQuery(''); setSelectedCity('الكل'); }}
-                className="text-blue-600 text-sm font-bold hover:underline"
-              >
-                إعادة ضبط البحث
-              </button>
+          {/* تنويه عن ميزة الصفحات المستقلة وروابط الـ SEO */}
+          <div className="mb-8 p-4 rounded-2xl bg-blue-50/70 border border-blue-200/70 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-blue-900 font-medium">
+            <div className="flex items-center gap-2.5">
+              <Sparkles size={18} className="text-blue-600 flex-shrink-0" />
+              <span>
+                <strong>ميزة جديدة:</strong> اضغط على صورة أي إعلان لفتحه في <strong>صفحة مستقلة مخصصة</strong> برابط دائم بالإنجليزية ومواصفات تفصيلية لزيادة الوصول وظهور الإعلان في محركات البحث.
+              </span>
             </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {filteredCars.map((car) => (
-                <div 
-                  key={car.id} 
-                  className="bg-white rounded-2xl overflow-hidden border border-slate-200 shadow-sm hover:shadow-xl transition-all duration-300 flex flex-col group"
-                >
-                  <div className="relative aspect-[16/10] overflow-hidden bg-slate-100">
-                    <img 
-                      src={car.image} 
-                      alt={`${car.make} ${car.model}`}
-                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                      loading="lazy"
-                    />
-                    <div className="absolute top-3 right-3 bg-slate-900/80 backdrop-blur-md text-white text-xs font-bold px-3 py-1.5 rounded-lg flex items-center gap-1.5">
-                      <MapPin className="w-3.5 h-3.5 text-blue-400" />
-                      <span>{car.city}</span>
-                    </div>
-                  </div>
+          </div>
 
-                  <div className="p-5 flex-1 flex flex-col justify-between space-y-4">
-                    <div>
-                      <div className="flex items-start justify-between gap-2">
-                        <h4 className="text-lg font-black text-slate-900">{car.make} {car.model}</h4>
-                        <span className="text-lg font-black text-blue-600 whitespace-nowrap">
-                          {car.price.toLocaleString()} <span className="text-xs font-bold">د.ل</span>
-                        </span>
-                      </div>
-                      
-                      <div className="flex items-center gap-4 mt-2 text-xs font-semibold text-slate-500">
-                        <span className="flex items-center gap-1 bg-slate-100 px-2.5 py-1 rounded-md">
-                          <Calendar className="w-3.5 h-3.5 text-slate-400" />
-                          <span>{car.year}</span>
-                        </span>
-                        <span className="flex items-center gap-1 bg-slate-100 px-2.5 py-1 rounded-md">
-                          <Gauge className="w-3.5 h-3.5 text-slate-400" />
-                          <span>{car.mileage}</span>
-                        </span>
-                      </div>
-
-                      <p className="text-slate-600 text-xs mt-3 line-clamp-2 leading-relaxed">
-                        {car.description}
-                      </p>
-                    </div>
-
-                    <div className="pt-3 border-t border-slate-100 flex gap-2">
-                      <a
-                        href={`https://wa.me/${car.whatsapp}?text=${encodeURIComponent(`السلام عليكم، استفسر عن سيارة ${car.make} ${car.model} موديل ${car.year} المعروضة في موقع cars.com.ly`)}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 px-4 rounded-xl flex items-center justify-center gap-2 text-sm shadow-md shadow-emerald-600/20 transition-colors"
-                      >
-                        <MessageCircle className="w-4 h-4" />
-                        <span>تواصل واتساب</span>
-                      </a>
-                    </div>
-                  </div>
-                </div>
-              ))}
+          {loading && (
+            <div className="text-center py-20">
+              <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+              <p className="text-slate-500 font-bold">جاري جلب إعلانات السيارات الحقيقية...</p>
             </div>
           )}
+
+          {!loading && filteredCars.length > 0 && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+              <AnimatePresence mode="popLayout">
+                {filteredCars.map((car) => (
+                  <motion.div
+                    key={car.id}
+                    layout
+                    initial={{ opacity: 0, scale: 0.9 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.9 }}
+                    transition={{ duration: 0.2 }}
+                  >
+                    <CarCard car={car} onDelete={handleDeleteCar} />
+                  </motion.div>
+                ))}
+              </AnimatePresence>
+            </div>
+          )}
+
+          {/* حالة عدم وجود أي سيارات في القاعدة */}
+          {!loading && cars.length === 0 && (
+            <motion.div 
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="text-center py-20 px-6 bg-white rounded-3xl border-2 border-dashed border-blue-200 max-w-2xl mx-auto shadow-sm"
+            >
+              <div className="w-16 h-16 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                <CarFront size={36} />
+              </div>
+              <h4 className="text-2xl font-black text-slate-900 mb-2">قاعدة البيانات جاهزة لاستقبال الإعلانات</h4>
+              <p className="text-slate-500 text-sm font-medium leading-relaxed mb-6">
+                أرسل بيانات سيارتك وسنقوم برفعها فوراً برابط مستقل ومعرض صور ومواصفات فنية متكاملة.
+              </p>
+              <button 
+                onClick={() => setShowForm(true)}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3.5 rounded-xl font-black text-sm inline-flex items-center gap-2 shadow-lg shadow-blue-500/20 active:scale-95 transition-all cursor-pointer"
+              >
+                <Plus size={20} />
+                أضف سيارة الآن
+              </button>
+            </motion.div>
+          )}
+
+          {/* حالة عدم العثور على نتائج بحث */}
+          {!loading && cars.length > 0 && filteredCars.length === 0 && (
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="text-center py-20 bg-white rounded-3xl border border-dashed border-slate-200"
+            >
+              <Search size={64} className="mx-auto text-slate-300 mb-4" />
+              <h4 className="text-xl font-bold text-slate-700">لم نجد سيارات تطابق بحثك</h4>
+              <p className="text-slate-400 mt-1 text-sm font-medium">جرب البحث بكلمات أخرى أو أعد ضبط البحث.</p>
+              <button 
+                onClick={() => { setSearchQuery(''); setShowOnlyMyAds(false); }}
+                className="mt-6 text-blue-600 font-bold hover:underline text-sm cursor-pointer"
+              >
+                عرض كافة السيارات
+              </button>
+            </motion.div>
+          )}
         </section>
+
+        {/* Benefits Section */}
+        <section className="bg-slate-100 py-20 px-4">
+          <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-8">
+            {[
+              { title: 'صفحة مستقلة ورابط دائم', desc: 'كل سيارة لها صفحتها الخاصة برابط إنجليزي دائم معتمد لدى Google ووسوم SEO لتحقيق أعلى نسبة مشاهدة.', icon: ShieldCheck },
+              { title: 'تواصل فوري واتساب ومكالمات', desc: 'زر واتساب مخصص لكل سيارة مع رسالة جاهزة وزر اتصال مباشر لمعاينة السيارة فوراً.', icon: MessageCircle },
+              { title: 'بدون أي عمولات أو رسوم', desc: 'تواصل مباشر مع مالك السيارة بدون أي وسيط ولا نسب بيع.', icon: UserCheck },
+            ].map((item, i) => (
+              <div key={i} className="bg-white p-8 rounded-3xl shadow-sm border border-slate-200">
+                <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center mb-6">
+                  <item.icon size={24} />
+                </div>
+                <h4 className="text-xl font-bold mb-3">{item.title}</h4>
+                <p className="text-slate-600 font-medium leading-relaxed text-sm">{item.desc}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* Code Explorer Section */}
+        <CodeExplorer />
       </main>
 
-      {/* Modal Add Car */}
-      {showModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-3xl max-w-xl w-full p-6 sm:p-8 shadow-2xl relative my-8 animate-in fade-in zoom-in duration-200">
-            <button
-              onClick={() => setShowModal(false)}
-              className="absolute left-6 top-6 text-slate-400 hover:text-slate-700 p-1 rounded-lg hover:bg-slate-100"
-            >
-              <X className="w-6 h-6" />
-            </button>
+      {/* Toast Notification */}
+      <AnimatePresence>
+        {toastMessage && (
+          <motion.div 
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className={`fixed top-6 left-1/2 -translate-x-1/2 z-[150] px-6 py-3.5 rounded-2xl shadow-xl font-bold text-sm border flex items-center gap-3 backdrop-blur-md ${
+              toastMessage.type === 'success' 
+                ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/30' 
+                : 'bg-rose-950/90 text-rose-200 border-rose-500/30'
+            }`}
+          >
+            <span className="w-2.5 h-2.5 rounded-full animate-pulse bg-current" />
+            {toastMessage.text}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-            <div className="flex items-center gap-3 mb-6">
-              <div className="w-10 h-10 rounded-xl bg-blue-100 text-blue-600 flex items-center justify-center">
-                <Plus className="w-6 h-6" />
-              </div>
-              <div>
-                <h3 className="text-xl font-black text-slate-900">إضافة إعلان سيارة جديدة</h3>
-                <p className="text-xs text-slate-500">سيظهر إعلانك فوراً في ليبيا</p>
-              </div>
-            </div>
-
-            <form onSubmit={handleSubmitCar} className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">الماركة (الشركة) *</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="مثال: تويوتا"
-                    value={formData.make}
-                    onChange={(e) => setFormData({ ...formData, make: e.target.value })}
-                    className="w-full px-3.5 py-2.5 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-600 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">الموديل (الفئة) *</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="مثال: كامري"
-                    value={formData.model}
-                    onChange={(e) => setFormData({ ...formData, model: e.target.value })}
-                    className="w-full px-3.5 py-2.5 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-600 focus:outline-none"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">سنة الصنع *</label>
-                  <input
-                    type="number"
-                    required
-                    min="1980"
-                    max={new Date().getFullYear() + 1}
-                    value={formData.year}
-                    onChange={(e) => setFormData({ ...formData, year: Number(e.target.value) })}
-                    className="w-full px-3 py-2.5 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-600 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">السعر (د.ل) *</label>
-                  <input
-                    type="number"
-                    required
-                    placeholder="مثال: 55000"
-                    value={formData.price}
-                    onChange={(e) => setFormData({ ...formData, price: e.target.value })}
-                    className="w-full px-3 py-2.5 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-600 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">المدينة *</label>
-                  <select
-                    value={formData.city}
-                    onChange={(e) => setFormData({ ...formData, city: e.target.value })}
-                    className="w-full px-2.5 py-2.5 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-600 focus:outline-none"
-                  >
-                    <option value="طرابلس">طرابلس</option>
-                    <option value="بنغازي">بنغازي</option>
-                    <option value="مصراتة">مصراتة</option>
-                    <option value="الزاوية">الزاوية</option>
-                    <option value="زليتن">زليتن</option>
-                    <option value="البيضاء">البيضاء</option>
-                    <option value="سبها">سبها</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">المسافة المقطوعة</label>
-                  <input
-                    type="text"
-                    placeholder="مثال: 45,000 كم"
-                    value={formData.mileage}
-                    onChange={(e) => setFormData({ ...formData, mileage: e.target.value })}
-                    className="w-full px-3.5 py-2.5 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-600 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">رقم الواتساب للتواصل *</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="مثال: 0912345678"
-                    value={formData.whatsapp}
-                    onChange={(e) => setFormData({ ...formData, whatsapp: e.target.value })}
-                    className="w-full px-3.5 py-2.5 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-600 focus:outline-none"
-                  />
-                </div>
-              </div>
-
-              {/* قسم رفع الصورة من الهاتف */}
-              <div className="space-y-2">
-                <label className="block text-xs font-bold text-slate-700">صورة السيارة</label>
-                
-                <input 
-                  type="file" 
-                  ref={fileInputRef}
-                  accept="image/*"
-                  onChange={handleImageUpload}
-                  className="hidden"
-                />
-
-                <div className="flex gap-3 items-center">
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={uploadingImage}
-                    className="flex-1 border-2 border-dashed border-blue-300 hover:border-blue-500 bg-blue-50/60 hover:bg-blue-50 py-4 px-3 rounded-2xl flex items-center justify-center gap-2 text-blue-700 transition-all font-bold text-xs sm:text-sm"
-                  >
-                    {uploadingImage ? (
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                    ) : (
-                      <Upload className="w-5 h-5 text-blue-600" />
-                    )}
-                    <span>{uploadingImage ? 'جاري معالجة الصورة...' : 'اضغط لاختيار صورة من هاتفك أو جهازك'}</span>
-                  </button>
-
-                  {formData.image && (
-                    <div className="relative w-16 h-16 rounded-xl overflow-hidden border border-slate-300 flex-shrink-0">
-                      <img src={formData.image} alt="معاينة" className="w-full h-full object-cover" />
-                      <button
-                        type="button"
-                        onClick={() => setFormData({ ...formData, image: '' })}
-                        className="absolute inset-0 bg-rose-600/70 text-white text-[10px] font-bold flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity"
-                      >
-                        حذف
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">تفاصيل ومواصفات السيارة</label>
-                <textarea
-                  rows={3}
-                  placeholder="المحرك، الهيكل، الحالة العامة..."
-                  value={formData.description}
-                  onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                  className="w-full px-3.5 py-2.5 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-600 focus:outline-none"
-                />
-              </div>
-
-              <div className="pt-3">
-                <button
-                  type="submit"
-                  disabled={isSubmitting || uploadingImage}
-                  className={`w-full text-white font-black py-3 rounded-xl shadow-lg transition-all text-base flex items-center justify-center gap-2 ${
-                    isSubmitting ? 'bg-blue-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 active:scale-95 shadow-blue-600/30'
-                  }`}
-                >
-                  {isSubmitting ? (
-                    <>
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                      <span>جاري نشر الإعلان...</span>
-                    </>
-                  ) : (
-                    <span>نشر الإعلان الآن</span>
-                  )}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+      {/* Forms and Modals */}
+      {showForm && (
+        <CarForm 
+          onAdd={handleAddCar}
+          onCancel={() => setShowForm(false)}
+          onOpenAuth={() => {
+            setShowForm(false);
+            setShowAuthModal(true);
+          }}
+        />
       )}
 
+      {/* نافذة تسجيل الدخول والتوثيق */}
+      <AuthModal 
+        isOpen={showAuthModal}
+        onClose={() => setShowAuthModal(false)}
+        onSuccess={() => {
+          setToastMessage({ type: 'success', text: 'مرحباً بك! تم تسجيل الدخول بنجاح.' });
+          setTimeout(() => setToastMessage(null), 4000);
+        }}
+      />
+
       {/* Footer */}
-      <footer className="mt-20 border-t border-slate-200 py-8 text-center text-xs text-slate-500 font-semibold">
-        <p>© {new Date().getFullYear()} سوق سيارات ليبيا (cars.com.ly) - جميع الحقوق محفوظة</p>
+      <footer className="bg-white border-t border-slate-200 py-16 px-4">
+        <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-10">
+          <div>
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white">
+                <CarFront size={20} />
+              </div>
+              <h1 className="text-2xl font-black text-slate-900 tracking-tight">
+                CARS<span className="text-blue-600">.COM.LY</span>
+              </h1>
+            </div>
+            <p className="text-slate-500 font-medium max-w-sm text-sm">
+              سوق السيارات الليبي المعتمد لبيع وشراء السيارات بكل مدن ليبيا (طرابلس، بنغازي، مصراتة، الزاوية، سبها...).
+            </p>
+          </div>
+          
+          <div className="flex flex-col items-center md:items-end gap-4">
+            <div className="flex gap-6 text-sm">
+              <button onClick={() => setShowForm(true)} className="text-slate-500 hover:text-blue-600 font-bold transition-colors cursor-pointer">
+                أضف إعلانك
+              </button>
+              <button onClick={() => setShowAuthModal(true)} className="text-slate-500 hover:text-blue-600 font-bold transition-colors cursor-pointer">
+                تسجيل الدخول
+              </button>
+            </div>
+            <p className="text-slate-400 text-xs font-bold">جميع الحقوق محفوظة © 2026 cars.com.ly</p>
+          </div>
+        </div>
       </footer>
     </div>
   );
