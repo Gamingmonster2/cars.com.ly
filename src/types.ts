@@ -9,4 +9,18 @@ export interface Car {
   whatsapp: string;
   city: string;
   description: string;
+  createdAt?: number;
+  timeAgo?: string;
+  views?: number;
+  ownerId?: string;
+  ownerName?: string;
+}
+
+export interface UserProfile {
+  uid: string;
+  displayName: string;
+  email?: string;
+  phone?: string;
+  city?: string;
+  createdAt: number;
 }
